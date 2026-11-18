@@ -53,6 +53,10 @@ impl<'a> B<'a> {
     }
 }
 
+/// The thread the model picker acts on: one the facts know, this machine's or a linked machine's (`<link>~<id>`, known from that machine's mirror); the request
+/// names it as it is and the far router takes a `~` one to its own machine (net/far.rs METHODS: thread.modes, thread.effort, thread.speed, thread.provider).
+fn picks<F: Facts>(f: &F, sel: &str) -> bool { !sel.is_empty() && !sel.starts_with('@') && crate::session::select::Facts::thread_exists(f, sel) }
+
 pub fn act<F: Facts>(f: &F, hub: &str, session: &Value, sel: &str, action: &str, value: &str) -> Option<Out> {
     let mut b = B::new(hub, session);
     match action {
@@ -145,11 +149,11 @@ pub fn act<F: Facts>(f: &F, hub: &str, session: &Value, sel: &str, action: &str,
         }
         // the picker under the composer: a model within the provider (Ui.model: thread.modes), a reasoning effort or, for a "@provider" chip, another agent (Ui.effort.set)
         "model" => {
-            if sel.is_empty() || sel.contains('~') || sel.starts_with('@') || !crate::session::select::Facts::thread_exists(f, sel) { return None }
+            if !picks(f, sel) { return None }
             b.rpc("thread.modes", json!({"thread": sel, "model": value}));
         }
         "effort" => {
-            if sel.is_empty() || sel.contains('~') || sel.starts_with('@') || !crate::session::select::Facts::thread_exists(f, sel) { return None }
+            if !picks(f, sel) { return None }
             match value.strip_prefix('@') {
                 Some(provider) => b.rpc("thread.provider", json!({"thread": sel, "provider": provider})),
                 None => b.rpc("thread.effort", json!({"thread": sel, "effort": value})),
@@ -157,12 +161,12 @@ pub fn act<F: Facts>(f: &F, hub: &str, session: &Value, sel: &str, action: &str,
         }
         // the speed dial: Normal (""), Fast or UltraFast
         "speed" => {
-            if sel.is_empty() || sel.contains('~') || sel.starts_with('@') || !crate::session::select::Facts::thread_exists(f, sel) { return None }
+            if !picks(f, sel) { return None }
             b.rpc("thread.speed", json!({"thread": sel, "speed": value}));
         }
         // the desktop picker's cursor put on another agent (ModelPick.plan): one switch carrying `<provider>\u{1f}<model>`, then `\u{1f}<effort>` when the effort changed too; between turns the hub takes all of it or none
         "provider" => {
-            if sel.is_empty() || sel.contains('~') || sel.starts_with('@') || !crate::session::select::Facts::thread_exists(f, sel) { return None }
+            if !picks(f, sel) { return None }
             let mut p = value.split('\u{1f}');
             let provider = p.next().unwrap_or(""); if provider.is_empty() { return None }
             let mut q = json!({"thread": sel, "provider": provider, "model": p.next().unwrap_or("")});
@@ -255,6 +259,24 @@ mod tests {
     fn run(a: &str, v: &str, s: Value) -> Option<Out> { act(&F, "h", &s, T, a, v) }
     fn text(o: &Out, i: usize) -> String { o.cmds[i]["text"].as_str().unwrap().to_string() }
 
+    /// The picker on a linked machine's thread (`<link>~<id>`, known from that machine's mirror) asks for the change under that id, for the far router to carry;
+    /// a thread nobody knows, or an agent row, asks for nothing.
+    #[test] fn the_picker_acts_on_a_linked_machines_thread() {
+        struct Far;
+        impl composer::Facts for Far { fn bot_thread(&self, _: &str) -> bool { false } fn account_params(&self, _: &str) -> bool { false } }
+        impl select::Facts for Far {
+            fn thread_exists(&self, id: &str) -> bool { id == "L~t9" } fn turn_name(&self, _: &str) -> String { "idle".into() }
+            fn order_enabled(&self) -> bool { true } fn estimates_on(&self) -> bool { true }
+        }
+        impl Facts for Far { fn title_of(&self, _: &str) -> String { String::new() } fn root_of(&self, _: &str) -> String { String::new() } }
+        let s = json!({"sel": "L~t9", "rid": 5, "drafts": {}, "info": {}});
+        let o = act(&Far, "h", &s, "L~t9", "model", "fable").unwrap();
+        assert_eq!(o.cmds[0]["text"], json!(r#"{"id":5,"m":"thread.modes","p":{"thread":"L~t9","model":"fable"}}"#));
+        assert_eq!(text(&act(&Far, "h", &s, "L~t9", "effort", "high").unwrap(), 0), r#"{"id":5,"m":"thread.effort","p":{"thread":"L~t9","effort":"high"}}"#);
+        assert_eq!(text(&act(&Far, "h", &s, "L~t9", "speed", "fast").unwrap(), 0), r#"{"id":5,"m":"thread.speed","p":{"thread":"L~t9","speed":"fast"}}"#);
+        assert!(text(&act(&Far, "h", &s, "L~t9", "provider", "codex\u{1f}gpt").unwrap(), 0).contains(r#""m":"thread.provider""#));
+        for (sel, a) in [("L~t8", "model"), ("@claude", "model"), ("", "effort")] { assert!(act(&Far, "h", &s, sel, a, "x").is_none(), "{sel} {a}"); }
+    }
     #[test] fn panel_toggles_and_remembers_the_hand() {
         let o = run("panel", "", sess()).unwrap();
         assert_eq!(o.session_patch["panel"], json!(true)); assert_eq!(o.session_patch["info"][format!("panel.hand:{T}")], json!("1")); assert!(o.cmds.is_empty());

@@ -455,6 +455,12 @@ pub fn recent_unified(st: &State,far: &[(String,&State)],un: &Unified,p: &Value)
         // the sidebar's search box: the query is kept in the session (`@f.pq`); "proj-find" (the phones' toggle) changes nothing here
         "proj-find-q" => { session["drafts"]["@f.pq"]=json!(value); },
         "proj-find" => {},
+        // the model picker on a linked machine's thread: the dispatcher above knows only this machine's threads, so the picker's model, effort, speed and agent
+        // are asked here over that machine's mirror (the far router takes the request to it); without this the click was refused and the picker never moved
+        "model" | "effort" | "speed" | "provider" if sel_id.contains('~') && !std::ptr::eq(sel_st,st) => {
+            let Some(o)=crate::session::thread_actions::act(&crate::session::dispatch::StateFacts(sel_st),hub,&session,&sel_id,action,value) else { return refused("action.picker-far") };
+            crate::session::patch::merge(&mut session,&o.session_patch); cmds=[read_cmds.clone(),o.cmds].concat();
+        },
         // what a clicked link could not open, said once (present/linkopen.rs)
         "link-note" => cmds.push(json!({"type":"say","tone":"note","text":value})),
         // the machine switcher over the sidebar: "" every machine, "@here" this one, else a linked machine by name (not `machine-*`: those are the Machines page's)
@@ -1073,6 +1079,24 @@ mod state_tests {
         let mut q=params(); q["target"]=json!({"kind":"thread","id":"to"}); q["action"]=json!("link-open"); q["value"]=json!("backplane://file/pa/boards/main/main.kicad_pcb");
         let v=recent_unified(&st,&[],&un,&q).unwrap(); assert_eq!(v["nextTarget"]["id"],"ta"); assert_eq!(v["session"]["drafts"]["@view:ta"],"board");
         let _=std::fs::remove_dir_all(&d);
+    }
+    /// The model picker on a linked machine's thread: a click on a model, effort, speed or agent is asked for under that thread's `<link>~<id>` (the far router
+    /// takes it to its machine, net/far.rs METHODS); before, the dispatcher knew only this machine's threads and the view refused the click.
+    #[test] fn the_model_picker_changes_a_linked_machines_thread() {
+        let mut st=State::new(); st.lean=true;
+        let mut f=State::new(); f.lean=true;
+        event(&mut f,json!({"$":"ThreadCreated","id":"L~t9","project":"","title":"Theirs","env":"local","branch":"","worktree":"","provider":"claude","model":"","at":7}));
+        let far=vec![("framework".to_string(),&f)];
+        let (map,marks)=(HashMap::new(),HashMap::new()); let un=Unified{ far:&map, marks:&marks, here:"desk", rows:&HashMap::new() };
+        let press=|action: &str,value: &str| { let mut q=params(); q["target"]=json!({"kind":"thread","id":"L~t9"}); q["session"]["sel"]=json!("L~t9");
+            q["window"]=json!({"contextMessages":[],"messageIds":[],"historyUnits":[],"partial":[],"ids":[],"anchor":{"id":"","offset":0},"older":"","olderNext":"","hasMore":false,"remaining":0,"newer":0,"total":0});
+            q["page"]=json!({"thread":"L~t9","rows":[]}); q["action"]=json!(action); q["value"]=json!(value); recent_unified(&st,&far,&un,&q) };
+        let sent=|v: &Value| v["cmds"].as_array().into_iter().flatten().filter_map(|c| serde_json::from_str::<Value>(c["text"].as_str()?).ok()).collect::<Vec<_>>();
+        for (a,v,m) in [("model","fable","thread.modes"),("effort","high","thread.effort"),("speed","fast","thread.speed")] {
+            let out=press(a,v).expect("answered"); assert!(out.get("refused").is_none() && out["shown"].is_object(),"{a}: {out}");
+            let w=sent(&out); assert!(w.iter().any(|c|c["m"]==m && c["p"]["thread"]=="L~t9" && c["p"][if a=="model" {"model"} else {a}]==v),"{a}: {w:?}");
+        }
+        let w=sent(&press("provider","codex\u{1f}gpt").unwrap()); assert!(w.iter().any(|c|c["m"]=="thread.provider" && c["p"]["thread"]=="L~t9" && c["p"]["provider"]=="codex"),"{w:?}");
     }
     #[test] fn one_repository_on_two_machines_is_one_project() {
         let d=crate::plat::tmp::dir("unify");
